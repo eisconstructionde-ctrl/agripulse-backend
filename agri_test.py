@@ -27,7 +27,7 @@ app = FastAPI(title="AgriPulse Uydu Analiz API'si")
 
 # 5. Veri Modeli
 class TarlaAlani(BaseModel):
-    koordinatlar: List[List[float]] # [[boylam, enlem], [boylam, enlem], ...]
+    koordinatlar: List[List[float]]
 
 @app.get("/")
 def ana_sayfa():
@@ -41,6 +41,7 @@ def ndvi_analizi_yap(tarla: TarlaAlani):
             
         poligon = ee.Geometry.Polygon(tarla.koordinatlar)
         
+        # Uydu koleksiyonunu filtreleme
         gorsel_koleksiyonu = (
             ee.ImageCollection('COPERNICUS/S2_SR_HARMONIZED')
             .filterBounds(poligon)
@@ -51,10 +52,17 @@ def ndvi_analizi_yap(tarla: TarlaAlani):
         
         en_temiz_gorsel = gorsel_koleksiyonu.first()
         
-        if en_temiz_gorsel.count().getInfo() == 0:
-            raise HTTPException(status_code=404, detail="Belirtilen tarihlerde bulutsuz uydu görüntüsü bulunamadı.")
+        if en_temiz_gorsel is None:
+            raise HTTPException(status_code=404, detail="Belirtilen kriterlerde uydu görüntüsü bulunamadı.")
             
-        ndvi = en_temiz_gorsel.normalizedDifference(['B8', 'B4'])
+        # HATA ÖNLEYİCİ: Bantları manuel seçip float tipine zorluyoruz
+        b8_bandi = en_temiz_gorsel.select('B8').toFloat()
+        b4_bandi = en_temiz_gorsel.select('B4').toFloat()
+        
+        # normalizedDifference hatasını aşmak için formülü matematiksel el sıkışmayla yazıyoruz: (B8 - B4) / (B8 + B4)
+        pay = b8_bandi.subtract(b4_bandi)
+        payda = b8_bandi.add(b4_bandi)
+        ndvi = pay.divide(payda).rename('nd')
         
         istatistikler = ndvi.reduceRegion(
             reducer=ee.Reducer.mean(),
