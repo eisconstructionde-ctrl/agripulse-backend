@@ -1,4 +1,14 @@
-import ee
+import os
+import json
+
+# Render bulut ortamında kimlik doğrulama ayarı
+token_data = os.environ.get("EARTHENGINE_TOKEN")
+if token_data:
+    config_dir = os.path.expanduser("~/.config/earthengine")
+    os.makedirs(config_dir, exist_ok=True)
+    with open(os.path.join(config_dir, "credentials"), "w") as f:
+        f.write(token_data)
+        import ee
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 from typing import List
