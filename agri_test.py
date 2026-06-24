@@ -1,71 +1,81 @@
 import os
 import json
 
-# Render bulut ortamında kimlik doğrulama ayarı
+# 1. Render bulut ortamında kimlik doğrulama ayarı
 token_data = os.environ.get("EARTHENGINE_TOKEN")
 if token_data:
     config_dir = os.path.expanduser("~/.config/earthengine")
     os.makedirs(config_dir, exist_ok=True)
     with open(os.path.join(config_dir, "credentials"), "w") as f:
         f.write(token_data)
-        import ee
+
+# 2. Gerekli Kütüphanelerin Yüklenmesi
+import ee
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 from typing import List
 
-# 1. Earth Engine Başlatma
+# 3. Earth Engine Başlatma
 try:
     ee.Initialize(project='agri-core-uk')
     print("Google Earth Engine API sunucusu için başarıyla başlatıldı.")
 except Exception as e:
     print(f"EE Başlatma Hatası: {e}")
 
-# 2. FastAPI Uygulamasını Tanımlıyoruz (Uvicorn'un aradığı 'app' burası)
+# 4. FastAPI Uygulamasını Tanımlıyoruz
 app = FastAPI(title="AgriPulse Uydu Analiz API'si")
 
-# 3. Veri Modeli (FlutterFlow'un bize göndereceği koordinat yapısı)
-class TarlaAlanı(BaseModel):
+# 5. Veri Modeli
+class TarlaAlani(BaseModel):
     koordinatlar: List[List[float]] # [[boylam, enlem], [boylam, enlem], ...]
 
 @app.get("/")
 def ana_sayfa():
-    return {"durum": "Sistem Aktif", "mesaj": "AgriPulse Uydu API'sine Hoş Geldiniz!"}
+    return {"durum": "Sistem Aktif", "mesaj": "AgriPulse Uydu Analiz API'sine Hoş Geldiniz!"}
 
 @app.post("/analiz/ndvi")
-def ndvi_analizi_yap(tarla: TarlaAlanı):
+def ndvi_analizi_yap(tarla: TarlaAlani):
     try:
-        # Gelen koordinatları EE Polygon formatına çeviriyoruz
-        polygon_geometrisi = ee.Geometry.Polygon([tarla.koordinatlar])
-
-        # Sentinel-2 uydusundan en temiz görüntüyü filtreliyoruz
-        görüntü = (ee.ImageCollection('COPERNICUS/S2_SR_HARMONIZED')
-                   .filterBounds(polygon_geometrisi)
-                   .filterDate('2026-05-01', '2026-06-01')
-                   .sort('CLOUDY_PIXEL_PERCENTAGE')
-                   .first())
-
-        # NDVI Hesaplama
-        ndvi = görüntü.normalizedDifference(['B8', 'B4'])
-
-        # Bölgesel Ortalama Hesaplama (Reducer)
-        ortalama_ndvi = ndvi.reduceRegion(
+        if not tarla.koordinatlar or len(tarla.koordinatlar) < 3:
+            raise HTTPException(status_code=400, detail="Geçersiz poligon. En az 3 koordinat gereklidir.")
+            
+        poligon = ee.Geometry.Polygon(tarla.koordinatlar)
+        
+        gorsel_koleksiyonu = (
+            ee.ImageCollection('COPERNICUS/S2_SR_HARMONIZED')
+            .filterBounds(poligon)
+            .filterDate('2025-01-01', '2026-06-01')
+            .filter(ee.Filter.lt('CLOUDY_PIXEL_PERCENTAGE', 10))
+            .sort('CLOUDY_PIXEL_PERCENTAGE')
+        )
+        
+        en_temiz_gorsel = gorsel_koleksiyonu.first()
+        
+        if en_temiz_gorsel.count().getInfo() == 0:
+            raise HTTPException(status_code=404, detail="Belirtilen tarihlerde bulutsuz uydu görüntüsü bulunamadı.")
+            
+        ndvi = en_temiz_gorsel.normalizedDifference(['B8', 'B4'])
+        
+        istatistikler = ndvi.reduceRegion(
             reducer=ee.Reducer.mean(),
-            geometry=polygon_geometrisi,
+            geometry=poligon,
             scale=10,
             maxPixels=1e9
         )
-
-        # Skoru sayısal değere çeviriyoruz
-        skor = ortalama_ndvi.get('nd').getInfo()
-
-        if skor is None:
-            raise HTTPException(status_code=400, detail="Seçilen alanda geçerli uydu verisi bulunamadı.")
-
+        
+        sonuc = istatistikler.getInfo()
+        ortalama_ndvi = sonuc.get('nd')
+        
+        if ortalama_ndvi is None:
+            raise HTTPException(status_code=500, detail="Seçilen alanda NDVI hesaplanamadı.")
+            
         return {
-            "durum": "Basarili",
-            "ortalama_ndvi": round(skor, 4),
-            "tavsiye": "Deger dusuk. Tarla bos olabilir veya acil gubreleme/sulama ihtiyaci olabilir." if skor < 0.2 else "Bitki sagligi yerinde."
+            "durum": "Başarılı",
+            "ortalama_ndvi": round(ortalama_ndvi, 4),
+            "mesaj": "Tarla analizi başarıyla tamamlandı."
         }
-
+        
+    except HTTPException as http_err:
+        raise http_err
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail=f"Sistem Hatası: {str(e)}")
