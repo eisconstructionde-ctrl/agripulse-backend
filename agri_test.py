@@ -41,28 +41,34 @@ def ndvi_analizi_yap(tarla: TarlaAlani):
             
         poligon = ee.Geometry.Polygon(tarla.koordinatlar)
         
-        # Uydu koleksiyonunu filtreleme
+        # Sadece B4 ve B8 bantları içinde fiziksel olarak veri barındıran resimleri listele
         gorsel_koleksiyonu = (
             ee.ImageCollection('COPERNICUS/S2_SR_HARMONIZED')
             .filterBounds(poligon)
             .filterDate('2025-01-01', '2026-06-01')
             .filter(ee.Filter.lt('CLOUDY_PIXEL_PERCENTAGE', 10))
-            .sort('CLOUDY_PIXEL_PERCENTAGE')
+            # Boş/Hatalı pikselleri listeden elemek için maskeleme filtresi
+            .filter(ee.Filter.listContains('system:band_names', 'B8'))
+            .filter(ee.Filter.listContains('system:band_names', 'B4'))
         )
         
-        en_temiz_gorsel = gorsel_koleksiyonu.first()
+        # Koleksiyon boş mu kontrol et, boşsa tarihi esnetip tekrar dene
+        if gorsel_koleksiyonu.size().getInfo() == 0:
+            gorsel_koleksiyonu = (
+                ee.ImageCollection('COPERNICUS/S2_SR_HARMONIZED')
+                .filterBounds(poligon)
+                .filterDate('2024-06-01', '2026-06-01') # Tarihi genişlettik
+                .filter(ee.Filter.lt('CLOUDY_PIXEL_PERCENTAGE', 20))
+            )
+
+        # En az bulutlu olan ve veri içeren görüntüyü seç
+        en_temiz_gorsel = gorsel_koleksiyonu.sort('CLOUDY_PIXEL_PERCENTAGE').first()
         
         if en_temiz_gorsel is None:
             raise HTTPException(status_code=404, detail="Belirtilen kriterlerde uydu görüntüsü bulunamadı.")
             
-        # HATA ÖNLEYİCİ: Bantları manuel seçip float tipine zorluyoruz
-        b8_bandi = en_temiz_gorsel.select('B8').toFloat()
-        b4_bandi = en_temiz_gorsel.select('B4').toFloat()
-        
-        # normalizedDifference hatasını aşmak için formülü matematiksel el sıkışmayla yazıyoruz: (B8 - B4) / (B8 + B4)
-        pay = b8_bandi.subtract(b4_bandi)
-        payda = b8_bandi.add(b4_bandi)
-        ndvi = pay.divide(payda).rename('nd')
+        # Resmi garantiye almak için doğrudan yerleşik normalizedDifference fonksiyonunu kullanalım
+        ndvi = en_temiz_gorsel.normalizedDifference(['B8', 'B4']).rename('nd')
         
         istatistikler = ndvi.reduceRegion(
             reducer=ee.Reducer.mean(),
@@ -75,7 +81,7 @@ def ndvi_analizi_yap(tarla: TarlaAlani):
         ortalama_ndvi = sonuc.get('nd')
         
         if ortalama_ndvi is None:
-            raise HTTPException(status_code=500, detail="Seçilen alanda NDVI hesaplanamadı.")
+            raise HTTPException(status_code=500, detail="Seçilen alandaki görüntü bozuk veya piksel verisi eksik.")
             
         return {
             "durum": "Başarılı",
